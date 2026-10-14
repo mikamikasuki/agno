@@ -4955,6 +4955,7 @@ class AsyncPostgresDb(AsyncBaseDb):
                         ).first()
                         if eligible is None:
                             return None
+                    previous_error = candidate_row.get("error")
                     stmt = (
                         update(table)
                         .where(table.c.id == candidate)
@@ -4963,12 +4964,18 @@ class AsyncPostgresDb(AsyncBaseDb):
                             locked_by=worker_id,
                             locked_at=now,
                             attempt=table.c.attempt + 1,
+                            error=None,
                             updated_at=now,
                         )
                         .returning(*table.c)
                     )
                     row = (await sess.execute(stmt)).fetchone()
-                    return dict(row._mapping) if row is not None else None
+                    if row is None:
+                        return None
+                    claimed_job = dict(row._mapping)
+                    if previous_error is not None:
+                        claimed_job["error"] = previous_error
+                    return claimed_job
         except Exception as e:
             log_error(f"Job queue store: claim failed for worker {worker_id} (deployment={deployment_id}): {e}")
             return None

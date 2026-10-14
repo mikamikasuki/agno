@@ -375,6 +375,93 @@ async def test_reclaimed_job_honors_a_persisted_non_retryable_run(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
+async def test_operator_requeue_retries_a_persisted_non_retryable_run(tmp_path, stream):
+    """An operator requeue explicitly overrides the run's earlier retryability decision."""
+    from uuid import uuid4
+
+    from agno.db.schemas.jobs import QueuedJob
+    from agno.db.sqlite import SqliteDb
+    from agno.job_queue.config import QueueConfig
+    from agno.job_queue.store import InMemoryQueueStore
+    from agno.os.job_queue import QueueWorker
+
+    @dataclass
+    class RequeueAgent(BaseExternalAgent):
+        should_fail: bool = True
+        calls: int = 0
+
+        def _is_retryable_error(self, error: Exception) -> bool:
+            return False
+
+        async def _arun_adapter(self, input: Any, **kwargs: Any) -> str:
+            self.calls += 1
+            if self.should_fail:
+                raise RuntimeError("auth failed")
+            return "ok"
+
+        async def _arun_adapter_stream(self, input: Any, **kwargs: Any):
+            result = await self._arun_adapter(input, **kwargs)
+            yield RunContentEvent(run_id=kwargs["run_id"], content=result)
+
+    agent = RequeueAgent(id="requeue", db=SqliteDb(db_file=str(tmp_path / "runs.db")))
+    store = InMemoryQueueStore()
+    run_id = str(uuid4())
+    await store.enqueue_job(
+        QueuedJob(
+            id=run_id,
+            component_type="agent",
+            component_id=agent.id,
+            session_id="s",
+            payload={"input": "go", "stream": stream},
+            max_attempts=1,
+        ).to_dict()
+    )
+
+    async def wait_for_status(status: str) -> dict:
+        async def poll() -> dict:
+            while True:
+                job = await store.get_job(run_id)
+                if job["status"] == status:
+                    return job
+                await asyncio.sleep(0.01)
+
+        return await asyncio.wait_for(poll(), 5)
+
+    first_worker = QueueWorker(
+        store=store,
+        resolve_component=lambda *_: agent,
+        config=QueueConfig(durable=True, poll_interval=0.01, retry_delay_seconds=0),
+        worker_id="worker-one",
+    )
+    await first_worker.start()
+    try:
+        first_job = await wait_for_status("failed")
+    finally:
+        await first_worker.stop()
+
+    assert first_job["attempt"] == 1
+    assert agent.calls == 1
+
+    agent.should_fail = False
+    assert await store.requeue_job(run_id)
+    second_worker = QueueWorker(
+        store=store,
+        resolve_component=lambda *_: agent,
+        config=QueueConfig(durable=True, poll_interval=0.01, retry_delay_seconds=0),
+        worker_id="worker-two",
+    )
+    await second_worker.start()
+    try:
+        retried_job = await wait_for_status("completed")
+    finally:
+        await second_worker.stop()
+
+    assert retried_job["attempt"] == 2
+    assert agent.calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
 async def test_cancel_during_backoff_keeps_tools_from_the_failed_attempt(stream):
     """A tool completed, the attempt failed, and the run was cancelled while waiting to retry:
     the cancelled run still records the tool that ran."""

@@ -72,6 +72,16 @@ class TestClaim:
         assert await store.claim_job("w1") is None
 
     @pytest.mark.asyncio
+    async def test_claim_clears_the_previous_error_but_returns_it_to_the_worker(self, store):
+        job = make_job("r1", error="previous attempt failed")
+        await store.enqueue_job(job)
+
+        claimed = await store.claim_job("w1")
+
+        assert claimed["error"] == "previous attempt failed"
+        assert (await store.get_job("r1"))["error"] is None
+
+    @pytest.mark.asyncio
     async def test_stale_lock_reclaim_gated_on_attempt_budget(self, store):
         """Crash reclaim: a stale running job is claimable only while
         attempt < max_attempts. With the default budget of 1, a crashed

@@ -2787,14 +2787,22 @@ class RedisDb(BaseDb):
                         if session_blocked(job, members):
                             pipe.unwatch()
                             return None
+                previous_error = job.get("error")
                 job.update(
-                    status="running", locked_by=worker_id, locked_at=now, attempt=job["attempt"] + 1, updated_at=now
+                    status="running",
+                    locked_by=worker_id,
+                    locked_at=now,
+                    attempt=job["attempt"] + 1,
+                    error=None,
+                    updated_at=now,
                 )
                 pipe.multi()
                 self._q_save_job_in_pipe(pipe, job)
                 pipe.zrem(self._q_key("queued"), job_id)
                 pipe.zadd(self._q_key("running"), {job_id: now})
                 pipe.execute()
+                if previous_error is not None:
+                    job["error"] = previous_error
                 return job
         except WatchError:
             return None

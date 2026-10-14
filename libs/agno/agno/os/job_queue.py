@@ -1789,6 +1789,13 @@ class QueueWorker:
             and job_type == "run"
             and component_for_stamp is not None
             and not payload.get("continue")
+            # A queued ticket with a prior error is a deliberate retry or
+            # operator requeue. Its old run row describes that prior attempt,
+            # so it must not prevent this one from executing. claim_job clears
+            # the stored ticket error while preserving it on this claim only;
+            # a later crash reclaim therefore still honors a newly persisted
+            # non-retryable result.
+            and not job.get("error")
             and await self._ahonor_non_retryable_row(component_for_stamp, job)
         ):
             return

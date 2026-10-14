@@ -90,14 +90,22 @@ class InMemoryQueueStore:
             if not candidates:
                 return None
             job = min(candidates, key=lambda j: (j["created_at"], j["id"]))
+            previous_error = job.get("error")
             job.update(
                 status="running",
                 locked_by=worker_id,
                 locked_at=now,
                 attempt=job["attempt"] + 1,
+                error=None,
                 updated_at=now,
             )
-            return dict(job)
+            claimed_job = dict(job)
+            if previous_error is not None:
+                # Keep the prior attempt's error visible to this execution, but
+                # clear it from the stored ticket so a later reclaim can tell
+                # this claim has already started.
+                claimed_job["error"] = previous_error
+            return claimed_job
 
     async def heartbeat_jobs(self, worker_id: str, job_ids: List[str]) -> int:
         async with self._lock:
